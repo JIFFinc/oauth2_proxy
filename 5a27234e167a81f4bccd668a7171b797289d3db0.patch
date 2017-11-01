@@ -1,0 +1,88 @@
+From 5a27234e167a81f4bccd668a7171b797289d3db0 Mon Sep 17 00:00:00 2001
+From: Benjamin Staffin <benley@gmail.com>
+Date: Fri, 2 Jun 2017 20:04:48 -0400
+Subject: [PATCH] Pass the raw token along in the Authorization header
+
+This makes it work with the kubernetes dashboard.
+---
+ oauthproxy.go              |  1 +
+ providers/oidc.go          |  1 +
+ providers/session_state.go | 21 ++++++++++++++++++---
+ 3 files changed, 20 insertions(+), 3 deletions(-)
+
+diff --git a/oauthproxy.go b/oauthproxy.go
+index dd2b58e9..f179749c 100644
+--- a/oauthproxy.go
++++ b/oauthproxy.go
+@@ -683,6 +683,7 @@ func (p *OAuthProxy) Authenticate(rw http.ResponseWriter, req *http.Request) int
+ 	}
+ 	if p.PassAccessToken && session.AccessToken != "" {
+ 		req.Header["X-Forwarded-Access-Token"] = []string{session.AccessToken}
++		req.Header["Authorization"] = []string{"Bearer " + session.RawIDToken}
+ 	}
+ 	if session.Email == "" {
+ 		rw.Header().Set("GAP-Auth", session.User)
+diff --git a/providers/oidc.go b/providers/oidc.go
+index 98d92203..51ae1759 100644
+--- a/providers/oidc.go
++++ b/providers/oidc.go
+@@ -67,6 +67,7 @@ func (p *OIDCProvider) Redeem(redirectURL, code string) (s *SessionState, err er
+ 		RefreshToken: token.RefreshToken,
+ 		ExpiresOn:    token.Expiry,
+ 		Email:        claims.Email,
++		RawIDToken:   rawIDToken,
+ 	}
+ 
+ 	return
+diff --git a/providers/session_state.go b/providers/session_state.go
+index 214b5a4a..5bfda904 100644
+--- a/providers/session_state.go
++++ b/providers/session_state.go
+@@ -15,6 +15,7 @@ type SessionState struct {
+ 	RefreshToken string
+ 	Email        string
+ 	User         string
++	RawIDToken   string
+ }
+ 
+ func (s *SessionState) IsExpired() bool {
+@@ -72,7 +73,14 @@ func (s *SessionState) EncryptedString(c *cookie.Cipher) (string, error) {
+ 			return "", err
+ 		}
+ 	}
+-	return fmt.Sprintf("%s|%s|%d|%s", s.userOrEmail(), a, s.ExpiresOn.Unix(), r), nil
++	rawIDToken := s.RawIDToken
++	if rawIDToken != "" {
++		rawIDToken, err = c.Encrypt(rawIDToken)
++		if err != nil {
++			return "", err
++		}
++	}
++	return fmt.Sprintf("%s|%s|%d|%s|%s", s.userOrEmail(), a, s.ExpiresOn.Unix(), r, rawIDToken), nil
+ }
+ 
+ func DecodeSessionState(v string, c *cookie.Cipher) (s *SessionState, err error) {
+@@ -85,8 +93,8 @@ func DecodeSessionState(v string, c *cookie.Cipher) (s *SessionState, err error)
+ 		return &SessionState{User: v}, nil
+ 	}
+ 
+-	if len(chunks) != 4 {
+-		err = fmt.Errorf("invalid number of fields (got %d expected 4)", len(chunks))
++	if len(chunks) != 5 {
++		err = fmt.Errorf("invalid number of fields (got %d expected 5)", len(chunks))
+ 		return
+ 	}
+ 
+@@ -111,5 +119,12 @@ func DecodeSessionState(v string, c *cookie.Cipher) (s *SessionState, err error)
+ 	}
+ 	ts, _ := strconv.Atoi(chunks[2])
+ 	s.ExpiresOn = time.Unix(int64(ts), 0)
++
++	if c != nil && chunks[4] != "" {
++		s.RawIDToken, err = c.Decrypt(chunks[4])
++		if err != nil {
++			return nil, err
++		}
++	}
+ 	return
+ }
